@@ -1,0 +1,98 @@
+import pandas as pd
+import numpy as np
+
+print("--- Step 1: Loading Raw M5 Dataset Files ---")
+
+# 1. Load Calendar Data (maps d_1..d_1913 to dates, months, and SNAP event flags)
+calendar = pd.read_csv('../data/raw/calendar.csv')
+
+# 2. Load Sell Prices Data
+sell_prices = pd.read_csv('../data/raw/sell_prices.csv')
+
+# 3. Load Sales Train Validation (Daily unit sales per item per store)
+# Note: Loading raw daily sales columns d_1 to d_1913
+sales = pd.read_csv('../data/raw/sales_train_validation.csv')
+
+print("Raw datasets successfully loaded!")
+
+# -------------------------------------------------------------------------
+# --- Step 2: Unpivoting Sales Data (Melting Daily Columns to Rows) ---
+# -------------------------------------------------------------------------
+print("--- Step 2: Reshaping Sales Data from Wide to Long Format ---")
+
+# Identify ID columns vs Day columns (d_1 to d_1913)
+id_cols = ['id', 'item_id', 'dept_id', 'cat_id', 'store_id', 'state_id']
+day_cols = [col for col in sales.columns if col.startswith('d_')]
+
+# Melt daily columns into a single 'd' and 'units_sold' column
+sales_melted = pd.melt(
+    sales,
+    id_vars=id_cols,
+    value_vars=day_cols,
+    var_name='d',
+    value_name='units_sold'
+)
+
+# -------------------------------------------------------------------------
+# --- Step 3: Merging with Calendar and Sell Prices ---
+# -------------------------------------------------------------------------
+print("--- Step 3: Merging Sales, Calendar, and Price Information ---")
+
+# Merge Calendar attributes (year, month, snap events)
+merged_df = pd.merge(sales_melted, calendar[['d', 'date', 'wm_yr_wk', 'year', 'month', 'snap_CA', 'snap_TX', 'snap_WI']], on='d', how='left')
+
+# Merge Sell Prices
+merged_df = pd.merge(merged_df, sell_prices, on=['store_id', 'item_id', 'wm_yr_wk'], how='left')
+
+# Calculate Revenue (Units Sold * Sell Price)
+merged_df['revenue'] = merged_df['units_sold'] * merged_df['sell_price']
+
+# Create a clean YYYY-MM period column for monthly grouping
+merged_df['year_month'] = merged_df['year'].astype(str) + '-' + merged_df['month'].astype(str).str.zfill(2)
+
+print("Data merge complete. Calculating aggregates...")
+
+# -------------------------------------------------------------------------
+# --- Step 4: Export Table 1 — Monthly Store & Category Sales ---
+# -------------------------------------------------------------------------
+print("--- Step 4: Generating Table 1 (Monthly Store & Category Sales) ---")
+
+monthly_summary = merged_df.groupby(['year_month', 'year', 'month', 'state_id', 'store_id', 'cat_id', 'dept_id']).agg(
+    total_units_sold=('units_sold', 'sum'),
+    total_revenue=('revenue', 'sum'),
+    avg_unit_price=('sell_price', 'mean'),
+    active_items_count=('item_id', 'nunique')
+).reset_index()
+
+# Round financial numbers to 2 decimal places
+monthly_summary['total_revenue'] = monthly_summary['total_revenue'].round(2)
+monthly_summary['avg_unit_price'] = monthly_summary['avg_unit_price'].round(2)
+
+# Export Table 1 to CSV
+monthly_summary.to_csv('../data/processed/monthly_store_category_sales.csv', index=False)
+print("Saved: ../data/processed/monthly_store_category_sales.csv")
+
+# -------------------------------------------------------------------------
+# --- Step 5: Export Table 2 — Item-Level Demand Volatility ---
+# -------------------------------------------------------------------------
+print("--- Step 5: Generating Table 2 (Item-Level Demand Volatility) ---")
+
+# Calculate demand stats per item & store
+item_stats = merged_df.groupby(['store_id', 'cat_id', 'item_id']).agg(
+    avg_sell_price=('sell_price', 'mean'),
+    total_units_sold=('units_sold', 'sum'),
+    mean_daily_units=('units_sold', 'mean'),
+    std_dev_units=('units_sold', 'std')
+).reset_index()
+
+# Calculate Coefficient of Variation (CV = StdDev / Mean)
+item_stats['coefficient_of_variation'] = (item_stats['std_dev_units'] / item_stats['mean_daily_units']).round(3)
+
+# Filter top 300 active items by total volume to keep file lightweight
+top_items_volatility = item_stats.sort_values(by='total_units_sold', ascending=False).head(300)
+
+# Export Table 2 to CSV
+top_items_volatility.to_csv('../data/processed/item_level_demand_variability.csv', index=False)
+print("Saved: ../data/processed/item_level_demand_variability.csv")
+
+print("--- Step 1 Pipeline Completed Successfully! ---")
